@@ -39,10 +39,47 @@ def revision(root):
     return subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
 
 
+def _stable_cli_findrefs_answer(text):
+    # String decoding fixes may intentionally change matched payload text while
+    # preserving the referenced DEX/method rows and their count.
+    return sorted(
+        line.split(' | matched=', 1)[0]
+        for line in text.splitlines()
+        if ' | ' in line
+    )
+
+
+def _wrap_workload_test(root, directory, test_name):
+    """Wrap a workload test file so old top-level imports (findrefs, utils, core, models)
+    are rewritten to droidasc.asc_core.*, matching the current package structure."""
+    import re
+    from pathlib import Path
+    workdir = directory if isinstance(directory, Path) else Path(directory)
+    src = (workdir / test_name).read_text(encoding='utf-8')
+    # Rewrite: `from findrefs.|from utils.|from core.|from models.`
+    #       → `from droidasc.asc_core.\1.`
+    src = re.sub(
+        r'^from (findrefs|utils|core|models)\.',
+        r'from droidasc.asc_core.\1.',
+        src,
+        flags=re.MULTILINE,
+    )
+    wrapper = workdir / f'_benchmark_{test_name}'
+    wrapper.write_text(
+        f'import sys\n'
+        f'sys.path.insert(0, {str(root)!r})\n'
+        f'{src}',
+        encoding='utf-8',
+    )
+    return wrapper
+
+
 def measure(root, directory, case, output, sample):
-    env = dict(os.environ, PYTHONPATH=str(root / 'src' / 'asc_core'), PYTHONHASHSEED='0')
+    env = dict(os.environ, PYTHONPATH='', PYTHONHASHSEED='0')
     if case in ('unit', 'core'):
-        command = [sys.executable, 'test_findrefs.py' if case == 'unit' else 'test.py']
+        test_name = 'test_findrefs.py' if case == 'unit' else 'test.py'
+        wrapper = _wrap_workload_test(root, directory, test_name)
+        command = [sys.executable, str(wrapper)]
     else:
         command = [sys.executable, str(root / 'main.py')]
         if case == 'cli_getclass':
@@ -68,8 +105,11 @@ def measure(root, directory, case, output, sample):
         if match is None:
             raise ValueError('missing CLI timing')
         times = {case: float(match[1])}
-        answer = (result.stdout.split('-' * 50)[-1].strip() if case == 'cli_getclass' else
-                  sorted(line for line in result.stdout.splitlines() if ' | ' in line))
+        answer = (
+            result.stdout.split('-' * 50)[-1].strip()
+            if case == 'cli_getclass'
+            else _stable_cli_findrefs_answer(result.stdout)
+        )
     if not answer or (case in ('core', 'cli_getclass') and 'class ClockFaceView' not in answer):
         raise ValueError(f'{case}: missing result')
     return times, answer

@@ -9,11 +9,31 @@ import unittest
 import zipfile
 
 from dex_fixture import make_dex, make_static_field_dex
-from src.asc_core.core.dex.dex_manager import DexManager
-from src.asc_core.utils.dex_parser import parse_encoded_array
-from src.asc_core.utils.tinydex import DEX
+from droidasc.asc_core.core.dex.dex_manager import DexManager
+from droidasc.asc_core.utils.dex_parser import parse_encoded_array
+from droidasc.asc_core.utils.tinydex import DEX
+from dadguard.decompiler.writer import Writer
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class WriterTests(unittest.TestCase):
+    def test_abstract_method_keeps_declared_parameters_without_code(self):
+        class Method:
+            access = ['public', 'abstract']
+            cls_name = 'Lexample/Test;'
+            name = 'run'
+            type = 'V'
+            lparams = []
+            params_type = ['I', 'Ljava/lang/String;']
+
+        writer = Writer(None, Method())
+        writer.write_method()
+
+        self.assertIn(
+            'public abstract void run(int p0, String p1);',
+            str(writer),
+        )
 
 
 class RebuildTests(unittest.TestCase):
@@ -37,24 +57,23 @@ class RebuildTests(unittest.TestCase):
         self.assertEqual(dex.fields[field_idx].name, 'SECOND')
 
 
-@unittest.skipUnless(importlib.util.find_spec('androguard'), 'install requirements.txt for decompiler tests')
+@unittest.skipUnless(importlib.util.find_spec('dadguard'), 'dadguard is required for decompiler tests')
 class DecompilerTests(unittest.TestCase):
-    def test_decompile_keeps_dummy_fast_path_and_class_zero(self):
+    def test_decompile_uses_dadguard_and_keeps_class_zero(self):
         script = """
 import sys
 sys.path.insert(0, 'tests')
 from dex_fixture import make_dex
 loaded = []
 sys.addaudithook(lambda event, args: loaded.append(args[0]) if event == 'import' else None)
-from src.asc_client.asc_handler import AscHandler
+from droidasc.asc_client.asc_handler import AscHandler
 for _ in range(2):
     source = AscHandler().getclass(make_dex(), 'Lexample/Test;')
     assert 'class Test' in source
     assert 'void first()' in source
     assert 'void second()' in source
-for name in ('email', 'xml.sax.saxutils', 'networkx', 'loguru'):
-    assert type(sys.modules[name]).__name__ == 'DummyModule', name
-    assert not any(module == name or module.startswith(name + '.') for module in loaded), name
+assert 'dadguard' in sys.modules
+assert not any(module == 'androguard' or module.startswith('androguard.') for module in loaded)
 assert sys.modules['mutf8.cmutf8'].decode_modified_utf8.__module__ == '_asc_client_mutf8_py'
 """
         result = subprocess.run([sys.executable, '-c', script], cwd=ROOT,
@@ -81,7 +100,7 @@ assert sys.modules['mutf8.cmutf8'].decode_modified_utf8.__module__ == '_asc_clie
                     self.assertIn('class Test', source.stdout)
 
     def test_gui_store_can_decompile_twice_and_then_search(self):
-        from src.asc_client.gui.runtime import GuiDexStore
+        from droidasc.asc_client.gui.backend import GuiDexStore
         with tempfile.TemporaryDirectory() as directory:
             apk = Path(directory) / 'fixture.apk'
             with zipfile.ZipFile(apk, 'w') as archive:
@@ -93,3 +112,16 @@ assert sys.modules['mutf8.cmutf8'].decode_modified_utf8.__module__ == '_asc_clie
             self.assertEqual(store.get_source('Lexample/Test;'), first)
             self.assertIn('class Test', first[1])
             self.assertTrue(store.search_members('method', 'first'))
+
+    def test_gui_store_subprocess_search_uses_package_module(self):
+        from droidasc.asc_client.gui.backend import GuiDexStore
+        with tempfile.TemporaryDirectory() as directory:
+            apk = Path(directory) / 'fixture.apk'
+            with zipfile.ZipFile(apk, 'w') as archive:
+                archive.writestr('classes.dex', make_dex())
+            store = GuiDexStore(str(apk), max_workers=1)
+            store.load()
+            result = store.search('string', 'token', max_workers=1)
+            self.assertEqual(result['backend'], 'subprocess')
+            self.assertEqual(result['total_hits'], 2)
+            self.assertEqual(len(result['results']), 2)
